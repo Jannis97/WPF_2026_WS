@@ -253,10 +253,8 @@ def main(load_json=False):
         tango_raw = load_tango_spectra()
         neo_raw = load_neospectra_spectra()
 
-        # Proben 3 und 5 ausschließen (keine Mandarinen)
-        exclude = ["3", "5"]
-        tango_data = build_dataset(tango_raw, hesperidin, "TANGO", exclude_ids=exclude)
-        neo_data = build_dataset(neo_raw, hesperidin, "NeoSpectra", exclude_ids=exclude)
+        tango_data = build_dataset(tango_raw, hesperidin, "TANGO")
+        neo_data = build_dataset(neo_raw, hesperidin, "NeoSpectra")
 
         save_to_json(tango_data, tango_json)
         save_to_json(neo_data, neo_json)
