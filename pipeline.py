@@ -204,56 +204,65 @@ def evaluate_all(X, y, selected_indices, max_comp=4):
     return results
 
 
+def _fast_forward_select(X_train, y_train, max_k):
+    """Schnelle Forward Selection ohne inner LOO – nutzt PRESS-Statistik."""
+    n = X_train.shape[0]
+    selected = []
+    remaining = list(range(X_train.shape[1]))
+
+    for step in range(max_k):
+        best_press = np.inf
+        best_j = None
+        for j in remaining:
+            cols = selected + [j]
+            Xs = X_train[:, cols]
+            # Hat-Matrix für LOO-PRESS: e_i/(1-h_ii)
+            try:
+                H = Xs @ np.linalg.pinv(Xs.T @ Xs) @ Xs.T
+                y_hat = H @ y_train
+                h = np.diag(H)
+                press = np.sum(((y_train - y_hat) / (1 - h)) ** 2)
+            except np.linalg.LinAlgError:
+                press = np.inf
+            if press < best_press:
+                best_press = press
+                best_j = j
+        selected.append(best_j)
+        remaining.remove(best_j)
+
+    return selected
+
+
 def nested_loo_varsel(X, y, max_vars=8):
     """Nested LOO: Variablenselektion + Modellfit INNERHALB jedes Folds.
     Gibt ehrliche Vorhersageperformance für neue Proben."""
     loo = LeaveOneOut()
     n = X.shape[0]
-    max_k = min(max_vars, n - 3)  # mind. 2 Freiheitsgrade im Training
+    max_k = min(max_vars, n - 3)
 
     # Pro Variablenanzahl: LOO-Vorhersagen sammeln
-    results = {}
-    for k in range(1, max_k + 1):
-        results[k] = np.zeros(n)
+    preds = {k: np.zeros(n) for k in range(1, max_k + 1)}
 
     for fold_idx, (train_idx, test_idx) in enumerate(loo.split(X)):
         X_train, X_test = X[train_idx], X[test_idx]
         y_train = y[train_idx]
 
-        # Forward Selection NUR auf Trainingsdaten
-        selected = []
-        remaining = list(range(X_train.shape[1]))
-        inner_loo = LeaveOneOut()
+        # Forward Selection NUR auf Trainingsdaten (schnell via PRESS)
+        selected = _fast_forward_select(X_train, y_train, max_k)
 
-        for step in range(max_k):
-            best_rmse = np.inf
-            best_j = None
-            for j in remaining:
-                cols = selected + [j]
-                y_inner = cross_val_predict(LinearRegression(),
-                                            X_train[:, cols], y_train,
-                                            cv=inner_loo)
-                rmse = np.sqrt(mean_squared_error(y_train, y_inner))
-                if rmse < best_rmse:
-                    best_rmse = rmse
-                    best_j = j
-            selected.append(best_j)
-            remaining.remove(best_j)
-
-            # Modell mit k=step+1 Variablen fitten und Testprobe vorhersagen
-            k = step + 1
+        for k in range(1, max_k + 1):
+            cols = selected[:k]
             model = LinearRegression()
-            model.fit(X_train[:, selected], y_train)
-            results[k][fold_idx] = model.predict(X_test[:, selected])[0]
+            model.fit(X_train[:, cols], y_train)
+            preds[k][fold_idx] = model.predict(X_test[:, cols])[0]
 
-    # Metriken berechnen
+    # Globale VarSel für Trainingsmetriken
+    global_sel, _ = forward_select_variables(X, y, max_vars=max_k)
+
     out = []
     for k in range(1, max_k + 1):
-        y_cv = results[k]
-        # Auch Trainingsmetriken (Resubstitution mit globaler VarSel)
+        y_cv = preds[k]
         model = LinearRegression()
-        # Globale VarSel für Trainingsmetriken (forward_select_variables)
-        global_sel, _ = forward_select_variables(X, y, max_vars=k)
         model.fit(X[:, global_sel[:k]], y)
         y_train_pred = model.predict(X[:, global_sel[:k]]).flatten()
 
