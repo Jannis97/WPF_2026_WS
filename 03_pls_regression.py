@@ -254,6 +254,28 @@ def print_results_table(results, dataset_name):
     print()
 
 
+def print_loo_table(y, y_pred, sample_ids, model_name, dataset_name):
+    """LOO-Vorhersagetabelle: pro Probe gemessen vs. vorhergesagt."""
+    header = f"\n{'='*70}\n  {dataset_name} – LOO-Vorhersagen ({model_name})\n{'='*70}"
+    print(header)
+
+    col_fmt = "  {sid:>8s}  {y_true:>10.4f}  {y_pred:>10.4f}  {err:>10.4f}  {rel:>8.1f}"
+    print(f"  {'Probe':>8s}  {'Gemessen%':>10s}  {'Vorherges%':>10s}  {'Fehler%':>10s}  {'Rel.%':>8s}")
+    print("  " + "-" * 65)
+
+    errors = []
+    for sid, yt, yp in zip(sample_ids, y, y_pred):
+        err = yp - yt
+        rel = abs(err) / yt * 100
+        errors.append(abs(err))
+        print(col_fmt.format(sid=sid, y_true=yt, y_pred=yp, err=err, rel=rel))
+
+    print("  " + "-" * 65)
+    mae = np.mean(errors)
+    print(f"  {'MAE':>8s}  {'':>10s}  {'':>10s}  {mae:>10.4f}  {mae/np.mean(y)*100:>8.1f}")
+    print()
+
+
 def plot_scatter(y_true, y_pred, rmse, r2, model_name, dataset_name, sample_ids):
     fig, ax = plt.subplots(figsize=(8, 7))
     unique_ids = sorted(set(sample_ids), key=lambda x: (not x.isdigit(), x))
@@ -343,6 +365,7 @@ def process_dataset(data, dataset_name):
     plot_model_comparison(all_results, dataset_name)
 
     best = all_results[0]
+    print_loo_table(y, best["y_pred"], sample_ids, best["name"], dataset_name)
     plot_scatter(y, best["y_pred"], best["rmse"], best["r2"],
                  best["name"], dataset_name, sample_ids)
 
