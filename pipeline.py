@@ -233,41 +233,92 @@ def _fast_forward_select(X_train, y_train, max_k):
     return selected
 
 
-def nested_loo_varsel(X, y, max_vars=8):
-    """Nested LOO: Variablenselektion + Modellfit INNERHALB jedes Folds.
-    Gibt ehrliche Vorhersageperformance für neue Proben."""
+def nested_loo_all(X, y, max_vars=8, max_comp=4):
+    """Nested LOO für ALLE Modelle: VarSel + PLS + PCR + ICA.
+    Variablenselektion UND Modellfit komplett innerhalb jedes Folds."""
+    from copy import deepcopy
     loo = LeaveOneOut()
     n = X.shape[0]
     max_k = min(max_vars, n - 3)
 
-    # Pro Variablenanzahl: LOO-Vorhersagen sammeln
-    preds = {k: np.zeros(n) for k in range(1, max_k + 1)}
+    # Alle Modellnamen + Prediction-Arrays vorbereiten
+    model_preds = {}
 
+    # VarSel Namen
+    for k in range(1, max_k + 1):
+        model_preds[f"Nested VarSel({k})"] = np.zeros(n)
+
+    # PLS, PCR, ICA Namen
+    dimred_templates = {}
+    for nc in range(1, max_comp + 1):
+        dimred_templates[f"Nested PLS({nc})"] = lambda nc=nc: PLSRegression(n_components=nc, scale=True)
+        for rn, rf in [("LR", lambda: LinearRegression()),
+                       ("Ridge", lambda: Ridge(alpha=1.0)),
+                       ("Lasso", lambda: Lasso(alpha=0.1, max_iter=10000))]:
+            dimred_templates[f"Nested PCR({nc}) {rn}"] = lambda nc=nc, rf=rf: Pipeline([
+                ("scaler", StandardScaler()),
+                ("pca", PCA(n_components=nc)),
+                ("reg", rf()),
+            ])
+            dimred_templates[f"Nested ICA({nc}) {rn}"] = lambda nc=nc, rf=rf: Pipeline([
+                ("scaler", StandardScaler()),
+                ("ica", FastICA(n_components=nc, max_iter=1000, random_state=42)),
+                ("reg", rf()),
+            ])
+
+    for name in dimred_templates:
+        model_preds[name] = np.zeros(n)
+
+    # LOO-Folds
     for fold_idx, (train_idx, test_idx) in enumerate(loo.split(X)):
         X_train, X_test = X[train_idx], X[test_idx]
         y_train = y[train_idx]
 
-        # Forward Selection NUR auf Trainingsdaten (schnell via PRESS)
+        # VarSel innerhalb Fold
         selected = _fast_forward_select(X_train, y_train, max_k)
-
         for k in range(1, max_k + 1):
             cols = selected[:k]
             model = LinearRegression()
             model.fit(X_train[:, cols], y_train)
-            preds[k][fold_idx] = model.predict(X_test[:, cols])[0]
+            model_preds[f"Nested VarSel({k})"][fold_idx] = model.predict(X_test[:, cols])[0]
 
-    # Globale VarSel für Trainingsmetriken
+        # PLS, PCR, ICA innerhalb Fold
+        for name, model_fn in dimred_templates.items():
+            try:
+                model = model_fn()
+                model.fit(X_train, y_train)
+                pred = model.predict(X_test)
+                model_preds[name][fold_idx] = np.atleast_1d(pred).flatten()[0]
+            except Exception:
+                model_preds[name][fold_idx] = np.nan
+
+    # Globale Fits für Trainingsmetriken
     global_sel, _ = forward_select_variables(X, y, max_vars=max_k)
 
     out = []
-    for k in range(1, max_k + 1):
-        y_cv = preds[k]
-        model = LinearRegression()
-        model.fit(X[:, global_sel[:k]], y)
-        y_train_pred = model.predict(X[:, global_sel[:k]]).flatten()
+    for name, y_cv in model_preds.items():
+        if np.any(np.isnan(y_cv)):
+            continue
+
+        # Trainingsmetriken
+        if "VarSel" in name:
+            k = int(name.split("(")[1].split(")")[0])
+            model = LinearRegression()
+            model.fit(X[:, global_sel[:k]], y)
+            y_train_pred = model.predict(X[:, global_sel[:k]]).flatten()
+        else:
+            # Globaler Fit für dimred Modelle
+            base_name = name.replace("Nested ", "")
+            models_global = build_all_models(max_comp)
+            if base_name in models_global:
+                m = models_global[base_name]
+                m.fit(X, y)
+                y_train_pred = m.predict(X).flatten()
+            else:
+                y_train_pred = y_cv  # Fallback
 
         out.append({
-            "name": f"NestedLOO VarSel({k})",
+            "name": name,
             "R2_train": float(r2_score(y, y_train_pred)),
             "RMSE_train": float(np.sqrt(mean_squared_error(y, y_train_pred))),
             "R2_CV": float(r2_score(y, y_cv)),
@@ -276,6 +327,7 @@ def nested_loo_varsel(X, y, max_vars=8):
             "y_pred_train": y_train_pred.tolist(),
         })
 
+    out.sort(key=lambda r: r["RMSECV"])
     return out
 
 
@@ -408,7 +460,7 @@ def plot_varsel_univariate(X, y, wavelengths, dataset_name, out_dir):
     _save_plot(fig, out_dir / "varsel_univariate.png")
 
 
-def plot_scatter_models(y, results, sample_ids, dataset_name, out_dir):
+def plot_scatter_models(y, results, sample_ids, dataset_name, out_dir, fname="scatter_top_models.png"):
     """Scatter-Plots für Top-Modelle (LOO-Vorhersagen)."""
     # Top 6 Modelle plotten
     top = results[:6]
@@ -452,10 +504,10 @@ def plot_scatter_models(y, results, sample_ids, dataset_name, out_dir):
     fig.suptitle(f"{dataset_name} – LOO-Vorhersagen (Top {n} Modelle)",
                  fontsize=14, fontweight="bold")
     plt.tight_layout()
-    _save_plot(fig, out_dir / "scatter_top_models.png")
+    _save_plot(fig, out_dir / fname)
 
 
-def plot_model_comparison(results, dataset_name, out_dir):
+def plot_model_comparison(results, dataset_name, out_dir, fname="model_comparison.png"):
     """Balkendiagramm: Alle Modelle."""
     names = [r["name"] for r in results]
     rmses = [r["RMSECV"] for r in results]
@@ -485,7 +537,7 @@ def plot_model_comparison(results, dataset_name, out_dir):
     ax2.grid(True, alpha=0.3, axis="x")
 
     plt.tight_layout()
-    _save_plot(fig, out_dir / "model_comparison.png")
+    _save_plot(fig, out_dir / fname)
 
 
 # ===========================================================================
@@ -593,35 +645,42 @@ def run_pipeline(params):
     plot_varsel_r2_gain(step_metrics, f"{name}", out_dir)
     plot_varsel_univariate(X, y, wavelengths, f"{name}", out_dir)
 
-    # 4) Alle Modelle evaluieren (Standard LOO-CV)
-    results = evaluate_all(X, y, selected, max_comp)
+    # 4) Standard LOO-CV (optimistisch, VarSel auf allen Daten)
+    std_results = evaluate_all(X, y, selected, max_comp)
 
-    # 5) Nested LOO (ehrliche Performance für neue Proben)
-    print(f"  Nested LOO-CV läuft (VarSel innerhalb jedes Folds)...")
-    nested_results = nested_loo_varsel(X, y, max_vars=max_vs)
-    all_results = nested_results + results
-    all_results.sort(key=lambda r: r["RMSECV"])
+    # 5) Nested LOO – ALLES innerhalb jedes Folds (ehrlich)
+    print(f"  Nested LOO-CV läuft (alles innerhalb jedes Folds)...")
+    nested_results = nested_loo_all(X, y, max_vars=max_vs, max_comp=max_comp)
 
-    # 6) Tabellen ausgeben
-    print_results_table(all_results, dataset_name, name)
+    # 6) Tabellen: Nested (ehrlich) separat
+    print(f"\n  {'='*90}")
+    print(f"  EHRLICHE PERFORMANCE (Nested LOO – alles innerhalb jedes Folds)")
+    print(f"  {'='*90}")
+    print_results_table(nested_results, dataset_name, f"{name} [NESTED/EHRLICH]")
 
-    # LOO-Tabelle für bestes Nested-Modell und bestes Standard-Modell
-    best_nested = min(nested_results, key=lambda r: r["RMSECV"])
-    best_standard = results[0]
+    best_nested = nested_results[0]
     print_loo_table(y, np.array(best_nested["y_pred_cv"]), sample_ids,
-                    best_nested["name"], f"{name} (ehrliche Schätzung)")
-    if best_standard["name"] != best_nested["name"]:
-        print_loo_table(y, np.array(best_standard["y_pred_cv"]), sample_ids,
-                        best_standard["name"], f"{name} (optimistisch)")
+                    best_nested["name"], f"{name} [NESTED – ehrlich]")
 
-    # 7) Plots
-    plot_scatter_models(y, all_results, sample_ids, f"{name}", out_dir)
-    plot_model_comparison(all_results, f"{name}", out_dir)
+    # Tabelle: Standard (optimistisch)
+    print(f"\n  {'='*90}")
+    print(f"  OPTIMISTISCHE PERFORMANCE (Standard LOO – VarSel auf allen Daten)")
+    print(f"  {'='*90}")
+    print_results_table(std_results, dataset_name, f"{name} [STANDARD/optimistisch]")
 
-    results = all_results
+    # 7) Plots – getrennt für Nested und Standard
+    plot_scatter_models(y, nested_results, sample_ids,
+                        f"{name} [NESTED/ehrlich]", out_dir,
+                        fname="scatter_nested.png")
+    plot_scatter_models(y, std_results, sample_ids,
+                        f"{name} [optimistisch]", out_dir,
+                        fname="scatter_standard.png")
+    plot_model_comparison(nested_results, f"{name} [NESTED]", out_dir,
+                          fname="model_comparison_nested.png")
+    plot_model_comparison(std_results, f"{name} [Standard]", out_dir,
+                          fname="model_comparison_standard.png")
 
     # 8) Ergebnisse speichern
-    best = results[0]
     run_result = {
         "name": name,
         "spectrometer": spectrometer,
@@ -630,14 +689,18 @@ def run_pipeline(params):
         "n_samples": int(X.shape[0]),
         "selected_wavelengths": sel_wls,
         "varsel_steps": step_metrics,
-        "models": [{k: v for k, v in r.items() if k not in ("y_pred_cv", "y_pred_train")}
-                   for r in results],
-        "best_model": best["name"],
-        "best_R2CV": best["R2_CV"],
-        "best_RMSECV": best["RMSECV"],
+        "nested_models": [{k: v for k, v in r.items() if k not in ("y_pred_cv", "y_pred_train")}
+                          for r in nested_results],
+        "standard_models": [{k: v for k, v in r.items() if k not in ("y_pred_cv", "y_pred_train")}
+                            for r in std_results],
+        "best_model": std_results[0]["name"],
+        "best_R2CV": std_results[0]["R2_CV"],
+        "best_RMSECV": std_results[0]["RMSECV"],
         "best_nested_model": best_nested["name"],
         "best_nested_R2CV": best_nested["R2_CV"],
         "best_nested_RMSECV": best_nested["RMSECV"],
+        "models": [{k: v for k, v in r.items() if k not in ("y_pred_cv", "y_pred_train")}
+                   for r in nested_results],
     }
 
     with open(out_dir / "results.json", "w") as f:
