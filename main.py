@@ -10,6 +10,7 @@ Usage:
 
 from pipeline import run_pipeline
 from pathlib import Path
+from tqdm import tqdm
 
 RUNS_DIR = Path("runs")
 RUNS_DIR.mkdir(exist_ok=True)
@@ -20,9 +21,9 @@ def build_configs():
     configs = []
     for spectrometer in ["tango", "neospectra"]:
         for use_savgol in [False, True]:
-            for exclude_ids in [[], ["3", "5"]]:
+            for exclude_ids in [[], ["3", "5", "21"]]:
                 preproc = "SNV_SG1d" if use_savgol else "SNV"
-                filt = "excl3+5" if exclude_ids else "all"
+                filt = "excl3+5+21" if exclude_ids else "all"
                 name = f"{spectrometer}_{preproc}_{filt}"
                 configs.append({
                     "name": name,
@@ -86,8 +87,8 @@ def main():
     configs = build_configs()
     all_results = []
 
-    for i, cfg in enumerate(configs):
-        print(f"\n  >>> Run {i+1}/8: {cfg['name']}")
+    for cfg in tqdm(configs, desc="Pipeline Runs", unit="run"):
+        tqdm.write(f"\n  >>> Run: {cfg['name']}")
         result = run_pipeline(cfg)
         all_results.append(result)
 

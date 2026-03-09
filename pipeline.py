@@ -21,6 +21,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import LeaveOneOut, cross_val_predict
 from sklearn.metrics import mean_squared_error, r2_score
 from pathlib import Path
+from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 
@@ -116,7 +117,8 @@ def forward_select_variables(X, y, max_vars=8):
     remaining = list(range(X.shape[1]))
     step_metrics = []
 
-    for step in range(min(max_vars, X.shape[0] - 2)):
+    n_steps = min(max_vars, X.shape[0] - 2)
+    for step in tqdm(range(n_steps), desc="    VarSel", leave=False):
         best_rmse = np.inf
         best_idx = None
         for j in remaining:
@@ -191,7 +193,7 @@ def evaluate_all(X, y, selected_indices, max_comp=4):
 
     # --- PLS, PCR, ICA Modelle ---
     models = build_all_models(max_comp)
-    for name, model in models.items():
+    for name, model in tqdm(models.items(), desc="    Std-LOO Modelle", total=len(models), leave=False):
         try:
             y_cv = cross_val_predict(model, X, y, cv=loo).flatten()
             model.fit(X, y)
@@ -270,7 +272,9 @@ def nested_loo_all(X, y, max_vars=8, max_comp=4):
         model_preds[name] = np.zeros(n)
 
     # LOO-Folds
-    for fold_idx, (train_idx, test_idx) in enumerate(loo.split(X)):
+    for fold_idx, (train_idx, test_idx) in tqdm(enumerate(loo.split(X)),
+                                                  desc="    Nested LOO Folds",
+                                                  total=n, leave=False):
         X_train, X_test = X[train_idx], X[test_idx]
         y_train = y[train_idx]
 
@@ -442,7 +446,7 @@ def plot_varsel_univariate(X, y, wavelengths, dataset_name, out_dir):
     """RMSECV pro Einzelvariable über gesamtes Spektrum."""
     loo = LeaveOneOut()
     rmses = np.zeros(X.shape[1])
-    for j in range(X.shape[1]):
+    for j in tqdm(range(X.shape[1]), desc="    Univariate Scan", leave=False):
         y_pred = cross_val_predict(LinearRegression(), X[:, j:j+1], y, cv=loo)
         rmses[j] = np.sqrt(mean_squared_error(y, y_pred))
 
